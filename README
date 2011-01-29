@@ -4,6 +4,10 @@ managing and syncing between clients.
 To run:
 - Clone the repository.
 
+- Make sure Scala is installed.
+
+- Download the Scala Build Tool: http://code.google.com/p/simple-build-tool/wiki/Setup
+
 - Open the directory of the repository.
 
 - Create a folder called "lib" and include in it the following jars:
@@ -21,4 +25,4 @@ To run:
   sbt "run <port-number>"
 
   where <port-number> is the port number you want the server to listen on.
-  eg. sbt "run 8080" to run the server on port 8080
+  eg. sbt "run 8095" to run the server on port 8095

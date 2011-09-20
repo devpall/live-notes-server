@@ -29,7 +29,6 @@ import util.Log
 
 class Client(val id:Int, val document:Document, val connectionType:String) {
   var shadow = new String(document.text)
-  var backupShadow = new String(document.text)
   private var timestamp = Client currentTimestamp
 
   def logPrefix = "[Client " + id + "] "
@@ -43,7 +42,7 @@ class Client(val id:Int, val document:Document, val connectionType:String) {
     if (patch != "") {
       val patchObjects = Client.diffPatch.patch_fromText(patch)
 
-      val result = Client.diffPatch.patch_apply(patchObjects, shadow)
+      val result = Client.diffPatch.patch_apply(patchObjects.asInstanceOf[java.util.LinkedList[name.fraser.neil.plaintext.diff_match_patch.Patch]], shadow)
 
       val patchedDocument = result(0).asInstanceOf[String]
 

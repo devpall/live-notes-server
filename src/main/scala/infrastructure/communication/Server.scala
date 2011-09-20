@@ -80,7 +80,7 @@ object Server extends Actor {
    */
   def patchServer(documentName: String, patch: String) {
     val patchObjects = diffPatch.patch_fromText(patch)
-    val result = diffPatch.patch_apply(patchObjects,
+    val result = diffPatch.patch_apply(patchObjects.asInstanceOf[java.util.LinkedList[name.fraser.neil.plaintext.diff_match_patch.Patch]],
         document(documentName) text)
 
     document(documentName) text = result(0).asInstanceOf[String]

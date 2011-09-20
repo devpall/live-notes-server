@@ -25,12 +25,10 @@ import java.net.URLDecoder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
-import java.util.Set;
 import java.util.Stack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -62,11 +60,6 @@ public class diff_match_patch {
    */
   public short Diff_EditCost = 4;
   /**
-   * The size beyond which the double-ended diff activates.
-   * Double-ending is twice as fast, but less accurate.
-   */
-  public short Diff_DualThreshold = 32;
-  /**
    * At what point is no match declared (0.0 = perfection, 1.0 = very loose).
    */
   public float Match_Threshold = 0.5f;
@@ -91,7 +84,7 @@ public class diff_match_patch {
   /**
    * The number of bits in an int.
    */
-  private int Match_MaxBits = 32;
+  private short Match_MaxBits = 32;
 
   /**
    * Internal class for returning results from diff_linesToChars().
@@ -127,7 +120,7 @@ public class diff_match_patch {
 
   /**
    * Find the differences between two texts.
-   * Run a faster slightly less optimal diff
+   * Run a faster, slightly less optimal diff.
    * This method allows the 'checklines' of diff_main() to be optional.
    * Most of the time checklines is wanted, so default to true.
    * @param text1 Old string to be diffed.
@@ -139,41 +132,71 @@ public class diff_match_patch {
   }
 
   /**
+   * Find the differences between two texts.
+   * @param text1 Old string to be diffed.
+   * @param text2 New string to be diffed.
+   * @param checklines Speedup flag.  If false, then don't run a
+   *     line-level diff first to identify the changed areas.
+   *     If true, then run a faster slightly less optimal diff.
+   * @return Linked List of Diff objects.
+   */
+  public LinkedList<Diff> diff_main(String text1, String text2,
+                                    boolean checklines) {
+    // Set a deadline by which time the diff must be complete.
+    long deadline;
+    if (Diff_Timeout <= 0) {
+      deadline = Long.MAX_VALUE;
+    } else {
+      deadline = System.currentTimeMillis() + (long) (Diff_Timeout * 1000);
+    }
+    return diff_main(text1, text2, checklines, deadline);
+  }
+
+  /**
    * Find the differences between two texts.  Simplifies the problem by
    * stripping any common prefix or suffix off the texts before diffing.
    * @param text1 Old string to be diffed.
    * @param text2 New string to be diffed.
    * @param checklines Speedup flag.  If false, then don't run a
    *     line-level diff first to identify the changed areas.
-   *     If true, then run a faster slightly less optimal diff
+   *     If true, then run a faster slightly less optimal diff.
+   * @param deadline Time when the diff should be complete by.  Used
+   *     internally for recursive calls.  Users should set DiffTimeout instead.
    * @return Linked List of Diff objects.
    */
-  public LinkedList<Diff> diff_main(String text1, String text2,
-                                    boolean checklines) {
-    // Check for equality (speedup)
+  private LinkedList<Diff> diff_main(String text1, String text2,
+                                     boolean checklines, long deadline) {
+    // Check for null inputs.
+    if (text1 == null || text2 == null) {
+      throw new IllegalArgumentException("Null inputs. (diff_main)");
+    }
+
+    // Check for equality (speedup).
     LinkedList<Diff> diffs;
     if (text1.equals(text2)) {
       diffs = new LinkedList<Diff>();
-      diffs.add(new Diff(Operation.EQUAL, text1));
+      if (text1.length() != 0) {
+        diffs.add(new Diff(Operation.EQUAL, text1));
+      }
       return diffs;
     }
 
-    // Trim off common prefix (speedup)
+    // Trim off common prefix (speedup).
     int commonlength = diff_commonPrefix(text1, text2);
     String commonprefix = text1.substring(0, commonlength);
     text1 = text1.substring(commonlength);
     text2 = text2.substring(commonlength);
 
-    // Trim off common suffix (speedup)
+    // Trim off common suffix (speedup).
     commonlength = diff_commonSuffix(text1, text2);
     String commonsuffix = text1.substring(text1.length() - commonlength);
     text1 = text1.substring(0, text1.length() - commonlength);
     text2 = text2.substring(0, text2.length() - commonlength);
 
-    // Compute the diff on the middle block
-    diffs = diff_compute(text1, text2, checklines);
+    // Compute the diff on the middle block.
+    diffs = diff_compute(text1, text2, checklines, deadline);
 
-    // Restore the prefix and suffix
+    // Restore the prefix and suffix.
     if (commonprefix.length() != 0) {
       diffs.addFirst(new Diff(Operation.EQUAL, commonprefix));
     }
@@ -193,21 +216,22 @@ public class diff_match_patch {
    * @param text2 New string to be diffed.
    * @param checklines Speedup flag.  If false, then don't run a
    *     line-level diff first to identify the changed areas.
-   *     If true, then run a faster slightly less optimal diff
+   *     If true, then run a faster slightly less optimal diff.
+   * @param deadline Time when the diff should be complete by.
    * @return Linked List of Diff objects.
    */
-  protected LinkedList<Diff> diff_compute(String text1, String text2,
-                                          boolean checklines) {
+  private LinkedList<Diff> diff_compute(String text1, String text2,
+                                        boolean checklines, long deadline) {
     LinkedList<Diff> diffs = new LinkedList<Diff>();
 
     if (text1.length() == 0) {
-      // Just add some text (speedup)
+      // Just add some text (speedup).
       diffs.add(new Diff(Operation.INSERT, text2));
       return diffs;
     }
 
     if (text2.length() == 0) {
-      // Just delete some text (speedup)
+      // Just delete some text (speedup).
       diffs.add(new Diff(Operation.DELETE, text1));
       return diffs;
     }
@@ -216,12 +240,20 @@ public class diff_match_patch {
     String shorttext = text1.length() > text2.length() ? text2 : text1;
     int i = longtext.indexOf(shorttext);
     if (i != -1) {
-      // Shorter text is inside the longer text (speedup)
+      // Shorter text is inside the longer text (speedup).
       Operation op = (text1.length() > text2.length()) ?
                      Operation.DELETE : Operation.INSERT;
       diffs.add(new Diff(op, longtext.substring(0, i)));
       diffs.add(new Diff(Operation.EQUAL, shorttext));
       diffs.add(new Diff(op, longtext.substring(i + shorttext.length())));
+      return diffs;
+    }
+
+    if (shorttext.length() == 1) {
+      // Single character string.
+      // After the previous speedup, the character can't be an equality.
+      diffs.add(new Diff(Operation.DELETE, text1));
+      diffs.add(new Diff(Operation.INSERT, text2));
       return diffs;
     }
     longtext = shorttext = null;  // Garbage collect.
@@ -236,8 +268,10 @@ public class diff_match_patch {
       String text2_b = hm[3];
       String mid_common = hm[4];
       // Send both pairs off for separate processing.
-      LinkedList<Diff> diffs_a = diff_main(text1_a, text2_a, checklines);
-      LinkedList<Diff> diffs_b = diff_main(text1_b, text2_b, checklines);
+      LinkedList<Diff> diffs_a = diff_main(text1_a, text2_a,
+                                           checklines, deadline);
+      LinkedList<Diff> diffs_b = diff_main(text1_b, text2_b,
+                                           checklines, deadline);
       // Merge the results.
       diffs = diffs_a;
       diffs.add(new Diff(Operation.EQUAL, mid_common));
@@ -245,79 +279,233 @@ public class diff_match_patch {
       return diffs;
     }
 
-    // Perform a real diff.
-    if (checklines && (text1.length() < 100 || text2.length() < 100)) {
-      checklines = false;  // Too trivial for the overhead.
-    }
-    List<String> linearray = null;
-    if (checklines) {
-      // Scan the text on a line-by-line basis first.
-      LinesToCharsResult b = diff_linesToChars(text1, text2);
-      text1 = b.chars1;
-      text2 = b.chars2;
-      linearray = b.lineArray;
+    if (checklines && text1.length() > 100 && text2.length() > 100) {
+      return diff_lineMode(text1, text2, deadline);
     }
 
-    diffs = diff_map(text1, text2);
-    if (diffs == null) {
-      // No acceptable result.
-      diffs = new LinkedList<Diff>();
-      diffs.add(new Diff(Operation.DELETE, text1));
-      diffs.add(new Diff(Operation.INSERT, text2));
-    }
+    return diff_bisect(text1, text2, deadline);
+  }
+  
+  /**
+   * Do a quick line-level diff on both strings, then rediff the parts for
+   * greater accuracy.
+   * This speedup can produce non-minimal diffs.
+   * @param text1 Old string to be diffed.
+   * @param text2 New string to be diffed.
+   * @param deadline Time when the diff should be complete by.
+   * @return Linked List of Diff objects.
+   */
+  private LinkedList<Diff> diff_lineMode(String text1, String text2,
+                                         long deadline) {
+    // Scan the text on a line-by-line basis first.
+    LinesToCharsResult b = diff_linesToChars(text1, text2);
+    text1 = b.chars1;
+    text2 = b.chars2;
+    List<String> linearray = b.lineArray;
 
-    if (checklines) {
-      // Convert the diff back to original text.
-      diff_charsToLines(diffs, linearray);
-      // Eliminate freak matches (e.g. blank lines)
-      diff_cleanupSemantic(diffs);
+    LinkedList<Diff> diffs = diff_main(text1, text2, false, deadline);
 
-      // Rediff any replacement blocks, this time character-by-character.
-      // Add a dummy entry at the end.
-      diffs.add(new Diff(Operation.EQUAL, ""));
-      int count_delete = 0;
-      int count_insert = 0;
-      String text_delete = "";
-      String text_insert = "";
-      ListIterator<Diff> pointer = diffs.listIterator();
-      Diff thisDiff = pointer.next();
-      while (thisDiff != null) {
-        switch (thisDiff.operation) {
-        case INSERT:
-          count_insert++;
-          text_insert += thisDiff.text;
-          break;
-        case DELETE:
-          count_delete++;
-          text_delete += thisDiff.text;
-          break;
-        case EQUAL:
-          // Upon reaching an equality, check for prior redundancies.
-          if (count_delete >= 1 && count_insert >= 1) {
-            // Delete the offending records and add the merged ones.
+    // Convert the diff back to original text.
+    diff_charsToLines(diffs, linearray);
+    // Eliminate freak matches (e.g. blank lines)
+    diff_cleanupSemantic(diffs);
+
+    // Rediff any replacement blocks, this time character-by-character.
+    // Add a dummy entry at the end.
+    diffs.add(new Diff(Operation.EQUAL, ""));
+    int count_delete = 0;
+    int count_insert = 0;
+    String text_delete = "";
+    String text_insert = "";
+    ListIterator<Diff> pointer = diffs.listIterator();
+    Diff thisDiff = pointer.next();
+    while (thisDiff != null) {
+      switch (thisDiff.operation) {
+      case INSERT:
+        count_insert++;
+        text_insert += thisDiff.text;
+        break;
+      case DELETE:
+        count_delete++;
+        text_delete += thisDiff.text;
+        break;
+      case EQUAL:
+        // Upon reaching an equality, check for prior redundancies.
+        if (count_delete >= 1 && count_insert >= 1) {
+          // Delete the offending records and add the merged ones.
+          pointer.previous();
+          for (int j = 0; j < count_delete + count_insert; j++) {
             pointer.previous();
-            for (int j = 0; j < count_delete + count_insert; j++) {
-              pointer.previous();
-              pointer.remove();
-            }
-            for (Diff newDiff : diff_main(text_delete, text_insert, false)) {
-              pointer.add(newDiff);
-            }
+            pointer.remove();
           }
-          count_insert = 0;
-          count_delete = 0;
-          text_delete = "";
-          text_insert = "";
-          break;
+          for (Diff newDiff : diff_main(text_delete, text_insert, false,
+              deadline)) {
+            pointer.add(newDiff);
+          }
         }
-        thisDiff = pointer.hasNext() ? pointer.next() : null;
+        count_insert = 0;
+        count_delete = 0;
+        text_delete = "";
+        text_insert = "";
+        break;
       }
-      diffs.removeLast();  // Remove the dummy entry at the end.
+      thisDiff = pointer.hasNext() ? pointer.next() : null;
     }
+    diffs.removeLast();  // Remove the dummy entry at the end.
+
     return diffs;
   }
 
 
+  /**
+   * Find the 'middle snake' of a diff, split the problem in two
+   * and return the recursively constructed diff.
+   * See Myers 1986 paper: An O(ND) Difference Algorithm and Its Variations.
+   * @param text1 Old string to be diffed.
+   * @param text2 New string to be diffed.
+   * @param deadline Time at which to bail if not yet complete.
+   * @return LinkedList of Diff objects.
+   */
+  protected LinkedList<Diff> diff_bisect(String text1, String text2,
+      long deadline) {
+    // Cache the text lengths to prevent multiple calls.
+    int text1_length = text1.length();
+    int text2_length = text2.length();
+    int max_d = (text1_length + text2_length + 1) / 2;
+    int v_offset = max_d;
+    int v_length = 2 * max_d;
+    int[] v1 = new int[v_length];
+    int[] v2 = new int[v_length];
+    for (int x = 0; x < v_length; x++) {
+      v1[x] = -1;
+      v2[x] = -1;
+    }
+    v1[v_offset + 1] = 0;
+    v2[v_offset + 1] = 0;
+    int delta = text1_length - text2_length;
+    // If the total number of characters is odd, then the front path will
+    // collide with the reverse path.
+    boolean front = (delta % 2 != 0);
+    // Offsets for start and end of k loop.
+    // Prevents mapping of space beyond the grid.
+    int k1start = 0;
+    int k1end = 0;
+    int k2start = 0;
+    int k2end = 0;
+    for (int d = 0; d < max_d; d++) {
+      // Bail out if deadline is reached.
+      if (System.currentTimeMillis() > deadline) {
+        break;
+      }
+
+      // Walk the front path one step.
+      for (int k1 = -d + k1start; k1 <= d - k1end; k1 += 2) {
+        int k1_offset = v_offset + k1;
+        int x1;
+        if (k1 == -d || k1 != d && v1[k1_offset - 1] < v1[k1_offset + 1]) {
+          x1 = v1[k1_offset + 1];
+        } else {
+          x1 = v1[k1_offset - 1] + 1;
+        }
+        int y1 = x1 - k1;
+        while (x1 < text1_length && y1 < text2_length
+               && text1.charAt(x1) == text2.charAt(y1)) {
+          x1++;
+          y1++;
+        }
+        v1[k1_offset] = x1;
+        if (x1 > text1_length) {
+          // Ran off the right of the graph.
+          k1end += 2;
+        } else if (y1 > text2_length) {
+          // Ran off the bottom of the graph.
+          k1start += 2;
+        } else if (front) {
+          int k2_offset = v_offset + delta - k1;
+          if (k2_offset >= 0 && k2_offset < v_length && v2[k2_offset] != -1) {
+            // Mirror x2 onto top-left coordinate system.
+            int x2 = text1_length - v2[k2_offset];
+            if (x1 >= x2) {
+              // Overlap detected.
+              return diff_bisectSplit(text1, text2, x1, y1, deadline);
+            }
+          }
+        }
+      }
+
+      // Walk the reverse path one step.
+      for (int k2 = -d + k2start; k2 <= d - k2end; k2 += 2) {
+        int k2_offset = v_offset + k2;
+        int x2;
+        if (k2 == -d || k2 != d && v2[k2_offset - 1] < v2[k2_offset + 1]) {
+          x2 = v2[k2_offset + 1];
+        } else {
+          x2 = v2[k2_offset - 1] + 1;
+        }
+        int y2 = x2 - k2;
+        while (x2 < text1_length && y2 < text2_length
+               && text1.charAt(text1_length - x2 - 1)
+               == text2.charAt(text2_length - y2 - 1)) {
+          x2++;
+          y2++;
+        }
+        v2[k2_offset] = x2;
+        if (x2 > text1_length) {
+          // Ran off the left of the graph.
+          k2end += 2;
+        } else if (y2 > text2_length) {
+          // Ran off the top of the graph.
+          k2start += 2;
+        } else if (!front) {
+          int k1_offset = v_offset + delta - k2;
+          if (k1_offset >= 0 && k1_offset < v_length && v1[k1_offset] != -1) {
+            int x1 = v1[k1_offset];
+            int y1 = v_offset + x1 - k1_offset;
+            // Mirror x2 onto top-left coordinate system.
+            x2 = text1_length - x2;
+            if (x1 >= x2) {
+              // Overlap detected.
+              return diff_bisectSplit(text1, text2, x1, y1, deadline);
+            }
+          }
+        }
+      }
+    }
+    // Diff took too long and hit the deadline or
+    // number of diffs equals number of characters, no commonality at all.
+    LinkedList<Diff> diffs = new LinkedList<Diff>();
+    diffs.add(new Diff(Operation.DELETE, text1));
+    diffs.add(new Diff(Operation.INSERT, text2));
+    return diffs;
+  }
+
+
+  /**
+   * Given the location of the 'middle snake', split the diff in two parts
+   * and recurse.
+   * @param text1 Old string to be diffed.
+   * @param text2 New string to be diffed.
+   * @param x Index of split point in text1.
+   * @param y Index of split point in text2.
+   * @param deadline Time at which to bail if not yet complete.
+   * @return LinkedList of Diff objects.
+   */
+  private LinkedList<Diff> diff_bisectSplit(String text1, String text2,
+                                            int x, int y, long deadline) {
+    String text1a = text1.substring(0, x);
+    String text2a = text2.substring(0, y);
+    String text1b = text1.substring(x);
+    String text2b = text2.substring(y);
+
+    // Compute both diffs serially.
+    LinkedList<Diff> diffs = diff_main(text1a, text2a, false, deadline);
+    LinkedList<Diff> diffsb = diff_main(text1b, text2b, false, deadline);
+
+    diffs.addAll(diffsb);
+    return diffs;  
+  }
+
+  
   /**
    * Split two texts into a list of strings.  Reduce the texts to a string of
    * hashes where each Unicode character represents one line.
@@ -400,260 +588,6 @@ public class diff_match_patch {
 
 
   /**
-   * Explore the intersection points between the two texts.
-   * @param text1 Old string to be diffed.
-   * @param text2 New string to be diffed.
-   * @return LinkedList of Diff objects or null if no diff available.
-   */
-  protected LinkedList<Diff> diff_map(String text1, String text2) {
-    long ms_end = System.currentTimeMillis() + (long) (Diff_Timeout * 1000);
-    // Cache the text lengths to prevent multiple calls.
-    int text1_length = text1.length();
-    int text2_length = text2.length();
-    int max_d = text1_length + text2_length - 1;
-    boolean doubleEnd = Diff_DualThreshold * 2 < max_d;
-    List<Set<Long>> v_map1 = new ArrayList<Set<Long>>();
-    List<Set<Long>> v_map2 = new ArrayList<Set<Long>>();
-    Map<Integer, Integer> v1 = new HashMap<Integer, Integer>();
-    Map<Integer, Integer> v2 = new HashMap<Integer, Integer>();
-    v1.put(1, 0);
-    v2.put(1, 0);
-    int x, y;
-    Long footstep = 0L;  // Used to track overlapping paths.
-    Map<Long, Integer> footsteps = new HashMap<Long, Integer>();
-    boolean done = false;
-    // If the total number of characters is odd, then the front path will
-    // collide with the reverse path.
-    boolean front = ((text1_length + text2_length) % 2 == 1);
-    for (int d = 0; d < max_d; d++) {
-      // Bail out if timeout reached.
-      if (Diff_Timeout > 0 && System.currentTimeMillis() > ms_end) {
-        return null;
-      }
-
-      // Walk the front path one step.
-      v_map1.add(new HashSet<Long>());  // Adds at index 'd'.
-      for (int k = -d; k <= d; k += 2) {
-        if (k == -d || k != d && v1.get(k - 1) < v1.get(k + 1)) {
-          x = v1.get(k + 1);
-        } else {
-          x = v1.get(k - 1) + 1;
-        }
-        y = x - k;
-        if (doubleEnd) {
-          footstep = diff_footprint(x, y);
-          if (front && (footsteps.containsKey(footstep))) {
-            done = true;
-          }
-          if (!front) {
-            footsteps.put(footstep, d);
-          }
-        }
-        while (!done && x < text1_length && y < text2_length
-               && text1.charAt(x) == text2.charAt(y)) {
-          x++;
-          y++;
-          if (doubleEnd) {
-            footstep = diff_footprint(x, y);
-            if (front && (footsteps.containsKey(footstep))) {
-              done = true;
-            }
-            if (!front) {
-              footsteps.put(footstep, d);
-            }
-          }
-        }
-        v1.put(k, x);
-        v_map1.get(d).add(diff_footprint(x, y));
-        if (x == text1_length && y == text2_length) {
-          // Reached the end in single-path mode.
-          return diff_path1(v_map1, text1, text2);
-        } else if (done) {
-          // Front path ran over reverse path.
-          v_map2 = v_map2.subList(0, footsteps.get(footstep) + 1);
-          LinkedList<Diff> a = diff_path1(v_map1, text1.substring(0, x),
-                                          text2.substring(0, y));
-          a.addAll(diff_path2(v_map2, text1.substring(x), text2.substring(y)));
-          return a;
-        }
-      }
-
-      if (doubleEnd) {
-        // Walk the reverse path one step.
-        v_map2.add(new HashSet<Long>());  // Adds at index 'd'.
-        for (int k = -d; k <= d; k += 2) {
-          if (k == -d || k != d && v2.get(k - 1) < v2.get(k + 1)) {
-            x = v2.get(k + 1);
-          } else {
-            x = v2.get(k - 1) + 1;
-          }
-          y = x - k;
-          footstep = diff_footprint(text1_length - x, text2_length - y);
-          if (!front && (footsteps.containsKey(footstep))) {
-            done = true;
-          }
-          if (front) {
-            footsteps.put(footstep, d);
-          }
-          while (!done && x < text1_length && y < text2_length
-                 && text1.charAt(text1_length - x - 1)
-                 == text2.charAt(text2_length - y - 1)) {
-            x++;
-            y++;
-            footstep = diff_footprint(text1_length - x, text2_length - y);
-            if (!front && (footsteps.containsKey(footstep))) {
-              done = true;
-            }
-            if (front) {
-              footsteps.put(footstep, d);
-            }
-          }
-          v2.put(k, x);
-          v_map2.get(d).add(diff_footprint(x, y));
-          if (done) {
-            // Reverse path ran over front path.
-            v_map1 = v_map1.subList(0, footsteps.get(footstep) + 1);
-            LinkedList<Diff> a
-                = diff_path1(v_map1, text1.substring(0, text1_length - x),
-                             text2.substring(0, text2_length - y));
-            a.addAll(diff_path2(v_map2, text1.substring(text1_length - x),
-                                text2.substring(text2_length - y)));
-            return a;
-          }
-        }
-      }
-    }
-    // Number of diffs equals number of characters, no commonality at all.
-    return null;
-  }
-
-
-  /**
-   * Work from the middle back to the start to determine the path.
-   * @param v_map List of path sets.
-   * @param text1 Old string fragment to be diffed.
-   * @param text2 New string fragment to be diffed.
-   * @return LinkedList of Diff objects.
-   */
-  protected LinkedList<Diff> diff_path1(List<Set<Long>> v_map,
-                                        String text1, String text2) {
-    LinkedList<Diff> path = new LinkedList<Diff>();
-    int x = text1.length();
-    int y = text2.length();
-    Operation last_op = null;
-    for (int d = v_map.size() - 2; d >= 0; d--) {
-      while (true) {
-        if (v_map.get(d).contains(diff_footprint(x - 1, y))) {
-          x--;
-          if (last_op == Operation.DELETE) {
-            path.getFirst().text = text1.charAt(x) + path.getFirst().text;
-          } else {
-            path.addFirst(new Diff(Operation.DELETE,
-                                   text1.substring(x, x + 1)));
-          }
-          last_op = Operation.DELETE;
-          break;
-        } else if (v_map.get(d).contains(diff_footprint(x, y - 1))) {
-          y--;
-          if (last_op == Operation.INSERT) {
-            path.getFirst().text = text2.charAt(y) + path.getFirst().text;
-          } else {
-            path.addFirst(new Diff(Operation.INSERT,
-                                   text2.substring(y, y + 1)));
-          }
-          last_op = Operation.INSERT;
-          break;
-        } else {
-          x--;
-          y--;
-          assert (text1.charAt(x) == text2.charAt(y))
-                 : "No diagonal.  Can't happen. (diff_path1)";
-          if (last_op == Operation.EQUAL) {
-            path.getFirst().text = text1.charAt(x) + path.getFirst().text;
-          } else {
-            path.addFirst(new Diff(Operation.EQUAL, text1.substring(x, x + 1)));
-          }
-          last_op = Operation.EQUAL;
-        }
-      }
-    }
-    return path;
-  }
-
-
-  /**
-   * Work from the middle back to the end to determine the path.
-   * @param v_map List of path sets.
-   * @param text1 Old string fragment to be diffed.
-   * @param text2 New string fragment to be diffed.
-   * @return LinkedList of Diff objects.
-   */
-  protected LinkedList<Diff> diff_path2(List<Set<Long>> v_map,
-                                        String text1, String text2) {
-    LinkedList<Diff> path = new LinkedList<Diff>();
-    int x = text1.length();
-    int y = text2.length();
-    Operation last_op = null;
-    for (int d = v_map.size() - 2; d >= 0; d--) {
-      while (true) {
-        if (v_map.get(d).contains(diff_footprint(x - 1, y))) {
-          x--;
-          if (last_op == Operation.DELETE) {
-            path.getLast().text += text1.charAt(text1.length() - x - 1);
-          } else {
-            path.addLast(new Diff(Operation.DELETE,
-                text1.substring(text1.length() - x - 1, text1.length() - x)));
-          }
-          last_op = Operation.DELETE;
-          break;
-        } else if (v_map.get(d).contains(diff_footprint(x, y - 1))) {
-          y--;
-          if (last_op == Operation.INSERT) {
-            path.getLast().text += text2.charAt(text2.length() - y - 1);
-          } else {
-            path.addLast(new Diff(Operation.INSERT,
-                text2.substring(text2.length() - y - 1, text2.length() - y)));
-          }
-          last_op = Operation.INSERT;
-          break;
-        } else {
-          x--;
-          y--;
-          assert (text1.charAt(text1.length() - x - 1)
-                  == text2.charAt(text2.length() - y - 1))
-                 : "No diagonal.  Can't happen. (diff_path2)";
-          if (last_op == Operation.EQUAL) {
-            path.getLast().text += text1.charAt(text1.length() - x - 1);
-          } else {
-            path.addLast(new Diff(Operation.EQUAL,
-                text1.substring(text1.length() - x - 1, text1.length() - x)));
-          }
-          last_op = Operation.EQUAL;
-        }
-      }
-    }
-    return path;
-  }
-
-
-  /**
-   * Compute a good hash of two integers.
-   * @param x First int.
-   * @param y Second int.
-   * @return A long made up of both ints.
-   */
-  protected long diff_footprint(int x, int y) {
-    // The maximum size for a long is 9,223,372,036,854,775,807
-    // The maximum size for an int is 2,147,483,647
-    // Two ints fit nicely in one long.
-    long result = x;
-    result = result << 32;
-    result += y;
-    return result;
-  }
-
-
-  /**
    * Determine the common prefix of two strings
    * @param text1 First string.
    * @param text2 Second string.
@@ -692,8 +626,57 @@ public class diff_match_patch {
 
 
   /**
+   * Determine if the suffix of one string is the prefix of another.
+   * @param text1 First string.
+   * @param text2 Second string.
+   * @return The number of characters common to the end of the first
+   *     string and the start of the second string.
+   */
+  protected int diff_commonOverlap(String text1, String text2) {
+    // Cache the text lengths to prevent multiple calls.
+    int text1_length = text1.length();
+    int text2_length = text2.length();
+    // Eliminate the null case.
+    if (text1_length == 0 || text2_length == 0) {
+      return 0;
+    }
+    // Truncate the longer string.
+    if (text1_length > text2_length) {
+      text1 = text1.substring(text1_length - text2_length);
+    } else if (text1_length < text2_length) {
+      text2 = text2.substring(0, text1_length);
+    }
+    int text_length = Math.min(text1_length, text2_length);
+    // Quick check for the worst case.
+    if (text1.equals(text2)) {
+      return text_length;
+    }
+
+    // Start by looking for a single character match
+    // and increase length until no match is found.
+    // Performance analysis: http://neil.fraser.name/news/2010/11/04/
+    int best = 0;
+    int length = 1;
+    while (true) {
+      String pattern = text1.substring(text_length - length);
+      int found = text2.indexOf(pattern);
+      if (found == -1) {
+        return best;
+      }
+      length += found;
+      if (found == 0 || text1.substring(text_length - length).equals(
+          text2.substring(0, length))) {
+        best = length;
+        length++;
+      }
+    }
+  }
+
+
+  /**
    * Do the two texts share a substring which is at least half the length of
    * the longer text?
+   * This speedup can produce non-minimal diffs.
    * @param text1 First string.
    * @param text2 Second string.
    * @return Five element String array, containing the prefix of text1, the
@@ -701,9 +684,13 @@ public class diff_match_patch {
    *     common middle.  Or null if there was no match.
    */
   protected String[] diff_halfMatch(String text1, String text2) {
+    if (Diff_Timeout <= 0) {
+      // Don't risk returning a non-optimal diff if we have unlimited time.
+      return null;
+    }
     String longtext = text1.length() > text2.length() ? text1 : text2;
     String shorttext = text1.length() > text2.length() ? text2 : text1;
-    if (longtext.length() < 10 || shorttext.length() < 1) {
+    if (longtext.length() < 4 || shorttext.length() * 2 < longtext.length()) {
       return null;  // Pointless.
     }
 
@@ -766,7 +753,7 @@ public class diff_match_patch {
         best_shorttext_b = shorttext.substring(j + prefixLength);
       }
     }
-    if (best_common.length() >= longtext.length() / 2) {
+    if (best_common.length() * 2 >= longtext.length()) {
       return new String[]{best_longtext_a, best_longtext_b,
                           best_shorttext_a, best_shorttext_b, best_common};
     } else {
@@ -788,22 +775,34 @@ public class diff_match_patch {
     String lastequality = null; // Always equal to equalities.lastElement().text
     ListIterator<Diff> pointer = diffs.listIterator();
     // Number of characters that changed prior to the equality.
-    int length_changes1 = 0;
+    int length_insertions1 = 0;
+    int length_deletions1 = 0;
     // Number of characters that changed after the equality.
-    int length_changes2 = 0;
+    int length_insertions2 = 0;
+    int length_deletions2 = 0;
     Diff thisDiff = pointer.next();
     while (thisDiff != null) {
       if (thisDiff.operation == Operation.EQUAL) {
-        // equality found
+        // Equality found.
         equalities.push(thisDiff);
-        length_changes1 = length_changes2;
-        length_changes2 = 0;
+        length_insertions1 = length_insertions2;
+        length_deletions1 = length_deletions2;
+        length_insertions2 = 0;
+        length_deletions2 = 0;
         lastequality = thisDiff.text;
       } else {
-        // an insertion or deletion
-        length_changes2 += thisDiff.text.length();
-        if (lastequality != null && (lastequality.length() <= length_changes1)
-            && (lastequality.length() <= length_changes2)) {
+        // An insertion or deletion.
+        if (thisDiff.operation == Operation.INSERT) {
+          length_insertions2 += thisDiff.text.length();
+        } else {
+          length_deletions2 += thisDiff.text.length();
+        }
+        // Eliminate an equality that is smaller or equal to the edits on both
+        // sides of it.
+        if (lastequality != null && (lastequality.length()
+            <= Math.max(length_insertions1, length_deletions1))
+            && (lastequality.length()
+                <= Math.max(length_insertions2, length_deletions2))) {
           //System.out.println("Splitting: '" + lastequality + "'");
           // Walk back to offending equality.
           while (thisDiff != equalities.lastElement()) {
@@ -834,8 +833,10 @@ public class diff_match_patch {
             }
           }
 
-          length_changes1 = 0;  // Reset the counters.
-          length_changes2 = 0;
+          length_insertions1 = 0;  // Reset the counters.
+          length_insertions2 = 0;
+          length_deletions1 = 0;
+          length_deletions2 = 0;
           lastequality = null;
           changes = true;
         }
@@ -843,10 +844,48 @@ public class diff_match_patch {
       thisDiff = pointer.hasNext() ? pointer.next() : null;
     }
 
+    // Normalize the diff.
     if (changes) {
       diff_cleanupMerge(diffs);
     }
     diff_cleanupSemanticLossless(diffs);
+
+    // Find any overlaps between deletions and insertions.
+    // e.g: <del>abcxxx</del><ins>xxxdef</ins>
+    //   -> <del>abc</del>xxx<ins>def</ins>
+    // Only extract an overlap if it is as big as the edit ahead or behind it.
+    pointer = diffs.listIterator();
+    Diff prevDiff = null;
+    thisDiff = null;
+    if (pointer.hasNext()) {
+      prevDiff = pointer.next();
+      if (pointer.hasNext()) {
+        thisDiff = pointer.next();
+      }
+    }
+    while (thisDiff != null) {
+      if (prevDiff.operation == Operation.DELETE &&
+          thisDiff.operation == Operation.INSERT) {
+        String deletion = prevDiff.text;
+        String insertion = thisDiff.text;
+        int overlap_length = this.diff_commonOverlap(deletion, insertion);
+        if (overlap_length >= deletion.length() / 2.0 ||
+            overlap_length >= insertion.length() / 2.0) {
+          // Overlap found.  Insert an equality and trim the surrounding edits.
+          pointer.previous();
+          pointer.add(new Diff(Operation.EQUAL,
+                               insertion.substring(0, overlap_length)));
+          prevDiff.text =
+              deletion.substring(0, deletion.length() - overlap_length);
+          thisDiff.text = insertion.substring(overlap_length);
+          // pointer.add inserts the element before the cursor, so there is
+          // no need to step past the new element.
+        }
+        thisDiff = pointer.hasNext() ? pointer.next() : null;
+      }
+      prevDiff = thisDiff;
+      thisDiff = pointer.hasNext() ? pointer.next() : null;
+    }
   }
 
 
@@ -1010,7 +1049,7 @@ public class diff_match_patch {
     Diff safeDiff = thisDiff;  // The last Diff that is known to be unsplitable.
     while (thisDiff != null) {
       if (thisDiff.operation == Operation.EQUAL) {
-        // equality found
+        // Equality found.
         if (thisDiff.text.length() < Diff_EditCost && (post_ins || post_del)) {
           // Candidate found.
           equalities.push(thisDiff);
@@ -1025,7 +1064,7 @@ public class diff_match_patch {
         }
         post_ins = post_del = false;
       } else {
-        // an insertion or deletion
+        // An insertion or deletion.
         if (thisDiff.operation == Operation.DELETE) {
           post_del = true;
         } else {
@@ -1122,7 +1161,8 @@ public class diff_match_patch {
         prevEqual = null;
         break;
       case EQUAL:
-        if (count_delete != 0 || count_insert != 0) {
+        if (count_delete + count_insert > 1) {
+          boolean both_types = count_delete != 0 && count_insert != 0;
           // Delete the offending records.
           pointer.previous();  // Reverse direction.
           while (count_delete-- > 0) {
@@ -1133,7 +1173,7 @@ public class diff_match_patch {
             pointer.previous();
             pointer.remove();
           }
-          if (count_delete != 0 && count_insert != 0) {
+          if (both_types) {
             // Factor out any common prefixies.
             commonlength = diff_commonPrefix(text_insert, text_delete);
             if (commonlength != 0) {
@@ -1188,7 +1228,6 @@ public class diff_match_patch {
       }
       thisDiff = pointer.hasNext() ? pointer.next() : null;
     }
-    // System.out.println(diff);
     if (diffs.getLast().text.length() == 0) {
       diffs.removeLast();  // Remove the dummy entry at the end.
     }
@@ -1295,19 +1334,18 @@ public class diff_match_patch {
     int i = 0;
     for (Diff aDiff : diffs) {
       String text = aDiff.text.replace("&", "&amp;").replace("<", "&lt;")
-          .replace(">", "&gt;").replace("\n", "&para;<BR>");
+          .replace(">", "&gt;").replace("\n", "&para;<br>");
       switch (aDiff.operation) {
       case INSERT:
-        html.append("<INS STYLE=\"background:#E6FFE6;\" TITLE=\"i=").append(i)
-            .append("\">").append(text).append("</INS>");
+        html.append("<ins style=\"background:#e6ffe6;\">").append(text)
+            .append("</ins>");
         break;
       case DELETE:
-        html.append("<DEL STYLE=\"background:#FFE6E6;\" TITLE=\"i=").append(i)
-            .append("\">").append(text).append("</DEL>");
+        html.append("<del style=\"background:#ffe6e6;\">").append(text)
+            .append("</del>");
         break;
       case EQUAL:
-        html.append("<SPAN TITLE=\"i=").append(i).append("\">").append(text)
-            .append("</SPAN>");
+        html.append("<span>").append(text).append("</span>");
         break;
       }
       if (aDiff.operation != Operation.DELETE) {
@@ -1511,6 +1549,11 @@ public class diff_match_patch {
    * @return Best match index or -1.
    */
   public int match_main(String text, String pattern, int loc) {
+    // Check for null inputs.
+    if (text == null || pattern == null) {
+      throw new IllegalArgumentException("Null inputs. (match_main)");
+    }
+
     loc = Math.max(0, Math.min(loc, text.length()));
     if (text.equals(pattern)) {
       // Shortcut (potentially not guaranteed by the algorithm)
@@ -1729,6 +1772,9 @@ public class diff_match_patch {
    * @return LinkedList of Patch objects.
    */
   public LinkedList<Patch> patch_make(String text1, String text2) {
+    if (text1 == null || text2 == null) {
+      throw new IllegalArgumentException("Null inputs. (patch_make)");
+    }
     // No diffs provided, compute our own.
     LinkedList<Diff> diffs = diff_main(text1, text2, true);
     if (diffs.size() > 2) {
@@ -1746,6 +1792,9 @@ public class diff_match_patch {
    * @return LinkedList of Patch objects.
    */
   public LinkedList<Patch> patch_make(LinkedList<Diff> diffs) {
+    if (diffs == null) {
+      throw new IllegalArgumentException("Null inputs. (patch_make)");
+    }
     // No origin string provided, compute our own.
     String text1 = diff_text1(diffs);
     return patch_make(text1, diffs);
@@ -1775,6 +1824,10 @@ public class diff_match_patch {
    * @return LinkedList of Patch objects.
    */
   public LinkedList<Patch> patch_make(String text1, LinkedList<Diff> diffs) {
+    if (text1 == null || diffs == null) {
+      throw new IllegalArgumentException("Null inputs. (patch_make)");
+    }
+
     LinkedList<Patch> patches = new LinkedList<Patch>();
     if (diffs.isEmpty()) {
       return patches;  // Get rid of the null case.
@@ -1993,9 +2046,9 @@ public class diff_match_patch {
    * @return The padding string added to each side.
    */
   public String patch_addPadding(LinkedList<Patch> patches) {
-    int paddingLength = this.Patch_Margin;
+    short paddingLength = this.Patch_Margin;
     String nullPadding = "";
-    for (int x = 1; x <= paddingLength; x++) {
+    for (short x = 1; x <= paddingLength; x++) {
       nullPadding += String.valueOf((char) x);
     }
 
@@ -2051,10 +2104,11 @@ public class diff_match_patch {
   /**
    * Look through the patches and break up any which are longer than the
    * maximum limit of the match algorithm.
+   * Intended to be called only from within patch_apply.
    * @param patches LinkedList of Patch objects.
    */
   public void patch_splitMax(LinkedList<Patch> patches) {
-    int patch_size;
+    short patch_size = Match_MaxBits;
     String precontext, postcontext;
     Patch patch;
     int start1, start2;
@@ -2070,7 +2124,6 @@ public class diff_match_patch {
       }
       // Remove the big old patch.
       pointer.remove();
-      patch_size = Match_MaxBits;
       start1 = bigpatch.start1;
       start2 = bigpatch.start2;
       precontext = "";
@@ -2174,9 +2227,9 @@ public class diff_match_patch {
    * @return List of Patch objects.
    * @throws IllegalArgumentException If invalid input.
    */
-  public LinkedList<Patch> patch_fromText(String textline)
+  public List<Patch> patch_fromText(String textline)
       throws IllegalArgumentException {
-    LinkedList<Patch> patches = new LinkedList<Patch>();
+    List<Patch> patches = new LinkedList<Patch>();
     if (textline.length() == 0) {
       return patches;
     }
@@ -2406,3 +2459,4 @@ public class diff_match_patch {
         .replace("%2C", ",").replace("%23", "#");
   }
 }
+
